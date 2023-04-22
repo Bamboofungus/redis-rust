@@ -1,12 +1,13 @@
-// Uncomment this block to pass the first stage
 // use std::net::{TcpListener, TcpStream};
 // use std::io::{Read, Write};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::collections::HashMap;
+
 
 #[tokio::main]
 async fn main() {
-    println!("Logs from your program will appear here!");    
+    println!("Logs from your program will appear here!");   
     // TODO handle error
     let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
     loop {
@@ -17,14 +18,15 @@ async fn main() {
                 break
             },
         };
-        handle_stream_with_task(stream);
+        handle_stream_with_task(stream).await;
     }
 }
 
-fn handle_stream_with_task(mut stream: TcpStream) {
+async fn handle_stream_with_task(mut stream: TcpStream) {
     // create task to handle each stream opened
     tokio::task::spawn(async move {
         let mut buffer = [0; 1024];
+        let mut hashtable: HashMap<String, String> = HashMap::new();
         loop {
             match stream.read(&mut buffer).await {
                 Ok(0) => {
@@ -38,7 +40,7 @@ fn handle_stream_with_task(mut stream: TcpStream) {
                     println!("Received: {:?}", value);
                     if let RespValue::Array(vector) = value {
                         let (command, arguments) = vector.split_first().unwrap();
-                        let res = handle_command(command, arguments);
+                        let res = handle_command(command, arguments, &mut hashtable);
                         stream.write_all(res.as_bytes()).await.unwrap();
                     }
                 },
@@ -52,17 +54,37 @@ fn handle_stream_with_task(mut stream: TcpStream) {
     });   
 }
 
-fn handle_command(command: &RespValue, arguments: &[RespValue]) -> String {
+fn handle_command(command: &RespValue, arguments: &[RespValue], hashtable: &mut HashMap<String, String>) -> String {
     if let RespValue::BulkString(string) = command {
         match string.to_uppercase().as_str(){
             "ECHO" => { 
-                if arguments.len() <= 0 {
+                if arguments.len() != 1 {
                     "".to_string()
                 } else if let RespValue::BulkString(string) = &arguments[0] {
                     echo(string).to_string()
                 } else {
                     "".to_string()
                 }
+            },
+            "SET" => {
+                if arguments.len() != 2 {
+                    "".to_string()
+                } else if let (RespValue::BulkString(key), RespValue::BulkString(val)) = (&arguments[0], &arguments[1]) {
+                    set(key, val, hashtable)
+                } else {
+                    "".to_string()
+                }
+
+            },
+            "GET" => {
+                if arguments.len() != 1 {
+                    "".to_string()
+                } else if let RespValue::BulkString(string) = &arguments[0] {
+                    get(string, hashtable)
+                } else {
+                    "".to_string()
+                }
+
             },
             _ => {
                 println!("{}",string);
@@ -129,4 +151,14 @@ fn pong() -> String {
 
 fn echo(message: &str) -> String {
     format!("+{message}\r\n")
+}
+
+fn set(key: &str, val: &str, hashtable: &mut HashMap<String, String>) -> String{
+    hashtable.insert(key.to_string(), val.to_string());
+    "+OK\r\n".to_string()
+}
+
+fn get(key: &str, hashtable: &mut HashMap<String, String>) -> String {
+    let value = hashtable.get(key).unwrap();
+    format!("+{value}\r\n")
 }
