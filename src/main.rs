@@ -76,10 +76,10 @@ fn handle_command(command: &RespValue, arguments: &[RespValue], hashtable: &Arc<
             "SET" => {
                 match arguments {
                     [RespValue::BulkString(key), RespValue::BulkString(val)] => {
-                        set(key, val, -1, hashtable)
+                        set(key, val,  -1, hashtable)
                     },
-                    [RespValue::BulkString(key), RespValue::BulkString(val), RespValue::BulkString(command), RespValue::BulkString(expiry)] if command == "PX" => {
-                        set(key, val, expiry.parse::<i32>().unwrap(), hashtable)
+                    [RespValue::BulkString(key), RespValue::BulkString(val), RespValue::BulkString(command), RespValue::BulkString(expiry)] if command.to_uppercase().as_str() == "PX" => {
+                        set(key, val, expiry.parse::<i128>().unwrap(), hashtable)
                     },
                     _ => {
                         RespValue::Null.encode()
@@ -184,7 +184,7 @@ fn echo(message: &str) -> String {
     format!("+{message}\r\n")
 }
 
-fn set(key: &str, val: &str, duration: i32, hashtable: &Arc<Mutex<HashMap<String, HashtableValue>>>) -> String {
+fn set(key: &str, val: &str, duration: i128, hashtable: &Arc<Mutex<HashMap<String, HashtableValue>>>) -> String {
     if duration > 0 {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         let expiration_time = now.as_millis() + (duration as u128);
