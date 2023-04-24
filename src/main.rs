@@ -3,12 +3,19 @@
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{UNIX_EPOCH, SystemTime};
 
+#[derive(Clone)]
+struct HashtableValue {
+    value: String,
+    expiration_time: u128
+}
 
 #[tokio::main]
 async fn main() {
     println!("Logs from your program will appear here!");   
-    // TODO handle error
+    let shared_hashmap: Arc<Mutex<HashMap<String, HashtableValue>>> = Arc::new(Mutex::new(HashMap::new()));
     let listener = TcpListener::bind("127.0.0.1:6379").await.unwrap();
     loop {
         let (stream, _) = match listener.accept().await {
@@ -18,15 +25,15 @@ async fn main() {
                 break
             },
         };
-        handle_stream_with_task(stream).await;
+        handle_stream_with_task(stream, &shared_hashmap).await;
     }
 }
 
-async fn handle_stream_with_task(mut stream: TcpStream) {
+async fn handle_stream_with_task(mut stream: TcpStream, shared_hashmap : &Arc<Mutex<HashMap<String, HashtableValue>>>) {
+    let client_hashmap: Arc<Mutex<HashMap<String, HashtableValue>>> = shared_hashmap.clone();
     // create task to handle each stream opened
     tokio::task::spawn(async move {
         let mut buffer = [0; 1024];
-        let mut hashtable: HashMap<String, String> = HashMap::new();
         loop {
             match stream.read(&mut buffer).await {
                 Ok(0) => {
@@ -40,7 +47,7 @@ async fn handle_stream_with_task(mut stream: TcpStream) {
                     println!("Received: {:?}", value);
                     if let RespValue::Array(vector) = value {
                         let (command, arguments) = vector.split_first().unwrap();
-                        let res = handle_command(command, arguments, &mut hashtable);
+                        let res = handle_command(command, arguments,&client_hashmap);
                         stream.write_all(res.as_bytes()).await.unwrap();
                     }
                 },
@@ -54,7 +61,7 @@ async fn handle_stream_with_task(mut stream: TcpStream) {
     });   
 }
 
-fn handle_command(command: &RespValue, arguments: &[RespValue], hashtable: &mut HashMap<String, String>) -> String {
+fn handle_command(command: &RespValue, arguments: &[RespValue], hashtable: &Arc<Mutex<HashMap<String, HashtableValue>>>) -> String {
     if let RespValue::BulkString(string) = command {
         match string.to_uppercase().as_str(){
             "ECHO" => { 
@@ -67,20 +74,33 @@ fn handle_command(command: &RespValue, arguments: &[RespValue], hashtable: &mut 
                 }
             },
             "SET" => {
-                if arguments.len() != 2 {
-                    "".to_string()
-                } else if let (RespValue::BulkString(key), RespValue::BulkString(val)) = (&arguments[0], &arguments[1]) {
-                    set(key, val, hashtable)
-                } else {
-                    "".to_string()
+                match arguments {
+                    [RespValue::BulkString(key), RespValue::BulkString(val)] => {
+                        set(key, val, -1, hashtable)
+                    },
+                    [RespValue::BulkString(key), RespValue::BulkString(val), RespValue::BulkString(command), RespValue::BulkString(expiry)] if command == "PX" => {
+                        set(key, val, expiry.parse::<i32>().unwrap(), hashtable)
+                    },
+                    _ => {
+                        RespValue::Null.encode()
+                    }
                 }
-
             },
             "GET" => {
                 if arguments.len() != 1 {
                     "".to_string()
                 } else if let RespValue::BulkString(string) = &arguments[0] {
-                    get(string, hashtable)
+                    if let Some(hashtable_value) = get(string, hashtable) {
+                        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+                        if hashtable_value.expiration_time == 0 || (hashtable_value.expiration_time > now) {
+                            let message = hashtable_value.value;
+                            format!("+{message}\r\n")
+                        } else {
+                            RespValue::Null.encode()
+                        }
+                    } else {
+                        RespValue::Null.encode()
+                    }
                 } else {
                     "".to_string()
                 }
@@ -101,8 +121,19 @@ enum RespValue {
     // SimpleString(String),
     // Error(String),
     // Integer(i64),
+    Null,
     BulkString(String),
     Array(Vec<RespValue>),
+}
+
+impl RespValue {
+    pub fn encode(self) -> String {
+        match &self {
+            // TODO impl other encodes
+            RespValue::Null => "$-1\r\n".to_string(),
+            _ => panic!("value encode not implemented for: {:?}", self),
+        }
+    }
 }
 
 fn parse_resp(resp: &[u8]) -> Option<(RespValue, &[u8])> {
@@ -153,12 +184,18 @@ fn echo(message: &str) -> String {
     format!("+{message}\r\n")
 }
 
-fn set(key: &str, val: &str, hashtable: &mut HashMap<String, String>) -> String{
-    hashtable.insert(key.to_string(), val.to_string());
+fn set(key: &str, val: &str, duration: i32, hashtable: &Arc<Mutex<HashMap<String, HashtableValue>>>) -> String {
+    if duration > 0 {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let expiration_time = now.as_millis() + (duration as u128);
+        hashtable.lock().unwrap().insert(key.to_string(), HashtableValue {value: val.to_string(), expiration_time: expiration_time});
+    } else {
+        // no expiration
+        hashtable.lock().unwrap().insert(key.to_string(), HashtableValue {value: val.to_string(), expiration_time: 0 });
+    }
     "+OK\r\n".to_string()
 }
 
-fn get(key: &str, hashtable: &mut HashMap<String, String>) -> String {
-    let value = hashtable.get(key).unwrap();
-    format!("+{value}\r\n")
+fn get(key: &str, hashtable: &Arc<Mutex<HashMap<String, HashtableValue>>>) -> Option<HashtableValue> {
+   hashtable.lock().unwrap().get(key).cloned()
 }
